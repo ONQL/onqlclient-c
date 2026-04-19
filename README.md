@@ -2,13 +2,38 @@
 
 Official C client library for the ONQL database server.
 
-## Building
+## Installation
+
+The C driver is not currently published to a binary package registry; install
+it from source. Each tagged release also attaches prebuilt archives to its
+[GitHub Release page](https://github.com/ONQL/onqlclient-c/releases) for
+Linux, macOS, and Windows.
+
+### Build from source
 
 ```bash
+git clone https://github.com/ONQL/onqlclient-c.git
+cd onqlclient-c
 mkdir build && cd build
 cmake ..
 make
 sudo make install
+```
+
+### CMake `FetchContent`
+
+Consume directly from GitHub in your own project:
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(
+    onql
+    GIT_REPOSITORY https://github.com/ONQL/onqlclient-c.git
+    GIT_TAG        v0.1.0   # or: main
+)
+FetchContent_MakeAvailable(onql)
+
+target_link_libraries(your_target PRIVATE onql)
 ```
 
 ## Quick Start
