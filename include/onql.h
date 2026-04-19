@@ -50,53 +50,56 @@ void onql_close(onql_client *client);
  *  Direct ORM-style API (insert / update / delete / onql / build /
  *  process_result)
  *
- *  `path` is a dotted string:
- *    "mydb.users"        -> table `users` in database `mydb`
- *    "mydb.users.u1"     -> record with id `u1`
+ *  `query` arguments are ONQL expression strings, e.g.
+ *    "mydb.users[id=\"u1\"].id"
+ *    "mydb.orders[status=\"pending\"]"
  *
  *  Because the driver is dependency-free, every JSON-valued parameter
- *  (record, ctxvalues) is passed as a pre-serialized JSON string.
+ *  (record, ids, ctxvalues) is passed as a pre-serialized JSON string.
  * ================================================================== */
 
 /**
- * Insert a single record at `path`.
+ * Insert a single record into `db.table`.
  *
- * @param client      Connected client handle.
- * @param path        Table path (e.g. "mydb.users").
- * @param record_json JSON-serialized record object.
  * @param out_error   If non-NULL and the server returned an `error`,
  *                    receives a newly allocated error string (caller
  *                    frees with onql_free_string()); else NULL.
  * @return            Newly allocated string containing the decoded
- *                    `data` field from the server envelope (caller
- *                    frees with onql_free_string()); or NULL on
- *                    transport / protocol failure.
+ *                    `data` field (caller frees with onql_free_string());
+ *                    or NULL on transport / protocol failure.
  */
 char *onql_insert(onql_client *client,
-                  const char *path,
+                  const char *db,
+                  const char *table,
                   const char *record_json,
                   char **out_error);
 
 /**
- * Update the record at `path` (e.g. "mydb.users.u1").
+ * Update records in `db.table` matching `query` (or the explicit `ids_json`).
  *
- * @param record_json JSON object of fields to update.
+ * @param query       ONQL query expression string (pass "" when using ids_json).
  * @param protopass   Proto-pass profile, or NULL for "default".
+ * @param ids_json    JSON array of explicit record IDs (e.g. "[\"u1\"]"),
+ *                    or NULL for "[]".
  */
 char *onql_update(onql_client *client,
-                  const char *path,
+                  const char *db,
+                  const char *table,
                   const char *record_json,
+                  const char *query,
                   const char *protopass,
+                  const char *ids_json,
                   char **out_error);
 
 /**
- * Delete the record at `path`.
- *
- * @param protopass   Proto-pass profile, or NULL for "default".
+ * Delete records in `db.table` matching `query` (or the explicit `ids_json`).
  */
 char *onql_delete(onql_client *client,
-                  const char *path,
+                  const char *db,
+                  const char *table,
+                  const char *query,
                   const char *protopass,
+                  const char *ids_json,
                   char **out_error);
 
 /**
@@ -130,9 +133,7 @@ char *onql_build(const char *query,
  * Parse the standard `{"error":"...","data":"..."}` envelope.
  *
  * @return 0 on success (no error), -1 when an error was reported or the
- *         envelope could not be parsed. Any non-NULL out-parameters
- *         receive newly allocated strings that the caller must free with
- *         onql_free_string().
+ *         envelope could not be parsed.
  */
 int onql_process_result(const char *raw, char **out_data, char **out_error);
 

@@ -6,8 +6,7 @@ Official C client library for the ONQL database server.
 
 The C driver is not currently published to a binary package registry; install
 it from source. Each tagged release also attaches prebuilt archives to its
-[GitHub Release page](https://github.com/ONQL/onqlclient-c/releases) for
-Linux, macOS, and Windows.
+[GitHub Release page](https://github.com/ONQL/onqlclient-c/releases).
 
 ### Build from source
 
@@ -22,14 +21,12 @@ sudo make install
 
 ### CMake `FetchContent`
 
-Consume directly from GitHub in your own project:
-
 ```cmake
 include(FetchContent)
 FetchContent_Declare(
     onql
     GIT_REPOSITORY https://github.com/ONQL/onqlclient-c.git
-    GIT_TAG        v0.1.0   # or: main
+    GIT_TAG        v0.1.0
 )
 FetchContent_MakeAvailable(onql)
 
@@ -42,22 +39,31 @@ target_link_libraries(your_target PRIVATE onql)
 #include <stdio.h>
 #include "onql.h"
 
-int main() {
-    onql_client *client = onql_connect("localhost", 5656);
-    if (!client) {
-        fprintf(stderr, "Connection failed\n");
-        return 1;
-    }
+int main(void) {
+    onql_client *c = onql_connect("localhost", 5656);
+    if (!c) return 1;
 
-    // Execute a query
-    onql_response *res = onql_send_request(client, "onql",
-        "{\"db\":\"mydb\",\"table\":\"users\",\"query\":\"name = \\\"John\\\"\"}");
-    if (res) {
-        printf("%s\n", res->payload);
-        onql_response_free(res);
-    }
+    char *err = NULL;
 
-    onql_close(client);
+    char *data = onql_insert(c, "mydb", "users",
+        "{\"id\":\"u1\",\"name\":\"John\",\"age\":30}", &err);
+    onql_free_string(data);
+    onql_free_string(err);
+
+    char *q = onql_build("mydb.users[id=$1].id",
+                         (const char*[]){"u1"},
+                         (const int[]){1}, 1);
+
+    err = NULL;
+    data = onql_update(c, "mydb", "users", "{\"age\":31}",
+                       q, NULL, NULL, &err);
+    onql_free_string(data);
+    onql_free_string(err);
+    onql_free_string(q);
+
+    onql_delete(c, "mydb", "users", "", NULL, "[\"u1\"]", &err);
+
+    onql_close(c);
     return 0;
 }
 ```
@@ -67,20 +73,16 @@ int main() {
 ### Connection
 
 ```c
-// Connect to server
 onql_client *onql_connect(const char *host, int port);
-
-// Close connection and free resources
 void onql_close(onql_client *client);
 ```
 
-### Requests
+### Raw request
 
 ```c
-// Send request and wait for response (caller must free with onql_response_free)
-onql_response *onql_send_request(onql_client *client, const char *keyword, const char *payload);
-
-// Free a response
+onql_response *onql_send_request(onql_client *client,
+                                 const char *keyword,
+                                 const char *payload);
 void onql_response_free(onql_response *res);
 ```
 
@@ -98,46 +100,45 @@ typedef struct {
 
 On top of raw `onql_send_request`, the driver exposes convenience helpers for
 the `insert` / `update` / `delete` / `onql` operations. Each helper builds the
-standard payload envelope for you, parses the `{error, data}` response, and
-returns the decoded `data` as a newly heap-allocated string that the caller
-must free with `onql_free_string()`.
+standard payload envelope, parses the `{error, data}` response, and returns
+the decoded `data` as a newly heap-allocated string (free with
+`onql_free_string()`).
 
-Because the driver is dependency-free, every JSON-valued parameter (record,
-context values) is passed as a **pre-serialized JSON string** — use your
-favourite C JSON library (cJSON, jansson, …) to serialize.
+Because the driver is dependency-free, every JSON-valued parameter is passed
+as a **pre-serialized JSON string** — use cJSON, jansson, or similar.
 
-`path` is a dotted string identifying what you're operating on:
+`db` is passed explicitly to `insert` / `update` / `delete`. `onql` takes a
+fully-qualified ONQL expression.
 
-| Path shape | Meaning |
-|------------|---------|
-| `"mydb.users"` | Table (used by `onql_insert`) |
-| `"mydb.users.u1"` | Record id `u1` (used by `onql_update` / `onql_delete`) |
+`query` arguments are **ONQL expression strings**, e.g.
+`mydb.users[id="u1"].id`.
 
 ### Error handling
 
 Every helper accepts an `out_error` out-parameter. If the server returned a
-non-empty `error` field, the helper returns `NULL` and `*out_error` is set to
-a newly allocated error message (caller frees with `onql_free_string`). On
-transport failure, both the return value and `*out_error` are `NULL`.
+non-empty `error`, the helper returns `NULL` and `*out_error` is set to a
+newly allocated error string. On transport failure, both are `NULL`.
 
 ### `onql_insert`
 
 ```c
 char *onql_insert(onql_client *client,
-                  const char *path,         /* e.g. "mydb.users" */
-                  const char *record_json,  /* a single JSON object */
+                  const char *db,
+                  const char *table,
+                  const char *record_json,   /* a single JSON object */
                   char **out_error);
 ```
-
-Insert a **single** record.
 
 ### `onql_update`
 
 ```c
 char *onql_update(onql_client *client,
-                  const char *path,         /* e.g. "mydb.users.u1" */
-                  const char *record_json,  /* JSON object of fields to update */
-                  const char *protopass,    /* NULL -> "default" */
+                  const char *db,
+                  const char *table,
+                  const char *record_json,
+                  const char *query,         /* ONQL expression, or "" */
+                  const char *protopass,     /* NULL -> "default" */
+                  const char *ids_json,      /* NULL -> "[]" */
                   char **out_error);
 ```
 
@@ -145,8 +146,11 @@ char *onql_update(onql_client *client,
 
 ```c
 char *onql_delete(onql_client *client,
-                  const char *path,         /* e.g. "mydb.users.u1" */
-                  const char *protopass,    /* NULL -> "default" */
+                  const char *db,
+                  const char *table,
+                  const char *query,
+                  const char *protopass,
+                  const char *ids_json,
                   char **out_error);
 ```
 
@@ -170,10 +174,8 @@ char *onql_build(const char *query,
                  int n_values);
 ```
 
-Replace `$1`, `$2`, … placeholders. For each value, if `is_string[i]` is
-non-zero the value is double-quoted when substituted; otherwise it is inlined
-verbatim (numbers, booleans). Pass `is_string = NULL` to treat every value
-as raw.
+Replace `$1`, `$2`, … placeholders. If `is_string[i]` is non-zero the value
+is double-quoted when substituted; otherwise inlined verbatim.
 
 ### `onql_process_result`
 
@@ -181,61 +183,13 @@ as raw.
 int onql_process_result(const char *raw, char **out_data, char **out_error);
 ```
 
-Parse the standard `{"error":"…","data":…}` envelope. Returns `0` on
-success, `-1` when the server reported an error or the envelope could not be
-parsed. Out-parameters (when non-NULL) receive newly allocated strings that
-the caller must free with `onql_free_string`.
-
 ### `onql_free_string`
 
 ```c
 void onql_free_string(char *s);
 ```
 
-Free a string returned by any of the helpers above.
-
-### Full example
-
-```c
-#include <stdio.h>
-#include "onql.h"
-
-int main(void) {
-    onql_client *c = onql_connect("localhost", 5656);
-    if (!c) return 1;
-
-    char *err = NULL;
-
-    char *data = onql_insert(c, "mydb.users",
-        "{\"id\":\"u1\",\"name\":\"John\",\"age\":30}", &err);
-    onql_free_string(data);
-    onql_free_string(err);
-
-    /* Build and run a query */
-    const char *vals[]  = { "John", "18" };
-    const int   quote[] = { 1, 0 };
-    char *q = onql_build(
-        "select * from mydb.users where name = $1 and age > $2",
-        vals, quote, 2);
-
-    err = NULL;
-    data = onql_onql(c, q, NULL, NULL, NULL, &err);
-    if (data) printf("%s\n", data);
-    onql_free_string(data);
-    onql_free_string(err);
-    onql_free_string(q);
-
-    onql_update(c, "mydb.users.u1", "{\"age\":31}", NULL, &err);
-    onql_delete(c, "mydb.users.u1", NULL, &err);
-
-    onql_close(c);
-    return 0;
-}
-```
-
 ## Protocol
-
-The client communicates over TCP using a delimiter-based message format:
 
 ```
 <request_id>\x1E<keyword>\x1E<payload>\x04
