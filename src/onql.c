@@ -57,7 +57,6 @@ struct onql_client {
     char  *buf;       /* receive buffer  */
     size_t buf_len;   /* bytes of data   */
     size_t buf_cap;   /* allocated size  */
-    char  *db;        /* default database (heap-allocated, may be NULL) */
 };
 
 /* ------------------------------------------------------------------ */
@@ -282,7 +281,6 @@ void onql_close(onql_client *client) {
     if (client->sock != SOCK_INVALID)
         SOCK_CLOSE(client->sock);
     free(client->buf);
-    free(client->db);
     free(client);
 }
 
@@ -334,10 +332,29 @@ static int json_append_string(char **dst, size_t *len, size_t *cap,
     return str_append(dst, len, cap, "\"", 1);
 }
 
-void onql_setup(onql_client *client, const char *db) {
-    if (!client) return;
-    free(client->db);
-    client->db = db ? mem_dup_str(db, strlen(db)) : NULL;
+/* Parse "db.table" or "db.table.id" into dynamically-allocated pieces.
+ * Returns 0 on success; caller must free *out_db and *out_table (and
+ * *out_id when non-empty). */
+static int parse_path(const char *path, int require_id,
+                      char **out_db, char **out_table, char **out_id) {
+    *out_db = NULL; *out_table = NULL; *out_id = NULL;
+    if (!path || !*path) return -1;
+    const char *dot1 = strchr(path, '.');
+    if (!dot1 || dot1 == path) return -1;
+    const char *dot2 = strchr(dot1 + 1, '.');
+    size_t db_len = (size_t)(dot1 - path);
+    size_t table_len = dot2 ? (size_t)(dot2 - dot1 - 1) : strlen(dot1 + 1);
+    if (table_len == 0) return -1;
+    *out_db    = mem_dup_str(path, db_len);
+    *out_table = mem_dup_str(dot1 + 1, table_len);
+    if (dot2) {
+        *out_id = mem_dup_str(dot2 + 1, strlen(dot2 + 1));
+    } else {
+        *out_id = mem_dup_str("", 0);
+    }
+    if (!*out_db || !*out_table || !*out_id) return -1;
+    if (require_id && (*out_id)[0] == '\0') return -1;
+    return 0;
 }
 
 /* Internal: send `keyword` with a pre-built payload, returning the raw
@@ -487,11 +504,17 @@ err:
     free(s); return NULL;
 }
 
-char *onql_insert(onql_client *client, const char *table,
-                  const char *records_json, char **out_error) {
+char *onql_insert(onql_client *client, const char *path,
+                  const char *record_json, char **out_error) {
     if (out_error) *out_error = NULL;
     if (!client) return NULL;
-    char *payload = build_insert_payload(client->db, table, records_json);
+    char *db = NULL, *table = NULL, *id = NULL;
+    if (parse_path(path, 0, &db, &table, &id) != 0) {
+        free(db); free(table); free(id);
+        return NULL;
+    }
+    char *payload = build_insert_payload(db, table, record_json);
+    free(db); free(table); free(id);
     if (!payload) return NULL;
     char *raw = send_and_extract(client, "insert", payload);
     free(payload);
@@ -502,14 +525,32 @@ char *onql_insert(onql_client *client, const char *table,
     return data;
 }
 
-char *onql_update(onql_client *client, const char *table,
-                  const char *records_json, const char *query_json,
-                  const char *protopass, const char *ids_json,
+/* Build an "ids":["<id>"] JSON snippet. Caller frees. */
+static char *ids_array_single(const char *id) {
+    char *s = NULL; size_t len = 0, cap = 0;
+    if (str_append(&s, &len, &cap, "[", 1) != 0) goto err;
+    if (json_append_string(&s, &len, &cap, id) != 0) goto err;
+    if (str_append(&s, &len, &cap, "]", 1) != 0) goto err;
+    return s;
+err:
+    free(s); return NULL;
+}
+
+char *onql_update(onql_client *client, const char *path,
+                  const char *record_json, const char *protopass,
                   char **out_error) {
     if (out_error) *out_error = NULL;
     if (!client) return NULL;
-    char *payload = build_write_payload(client->db, table, records_json,
-                                        query_json, protopass, ids_json, 1);
+    char *db = NULL, *table = NULL, *id = NULL;
+    if (parse_path(path, 1, &db, &table, &id) != 0) {
+        free(db); free(table); free(id);
+        return NULL;
+    }
+    char *ids_json = ids_array_single(id);
+    char *payload = ids_json
+        ? build_write_payload(db, table, record_json, "\"\"", protopass, ids_json, 1)
+        : NULL;
+    free(db); free(table); free(id); free(ids_json);
     if (!payload) return NULL;
     char *raw = send_and_extract(client, "update", payload);
     free(payload);
@@ -520,13 +561,20 @@ char *onql_update(onql_client *client, const char *table,
     return data;
 }
 
-char *onql_delete(onql_client *client, const char *table,
-                  const char *query_json, const char *protopass,
-                  const char *ids_json, char **out_error) {
+char *onql_delete(onql_client *client, const char *path,
+                  const char *protopass, char **out_error) {
     if (out_error) *out_error = NULL;
     if (!client) return NULL;
-    char *payload = build_write_payload(client->db, table, NULL,
-                                        query_json, protopass, ids_json, 0);
+    char *db = NULL, *table = NULL, *id = NULL;
+    if (parse_path(path, 1, &db, &table, &id) != 0) {
+        free(db); free(table); free(id);
+        return NULL;
+    }
+    char *ids_json = ids_array_single(id);
+    char *payload = ids_json
+        ? build_write_payload(db, table, NULL, "\"\"", protopass, ids_json, 0)
+        : NULL;
+    free(db); free(table); free(id); free(ids_json);
     if (!payload) return NULL;
     char *raw = send_and_extract(client, "delete", payload);
     free(payload);

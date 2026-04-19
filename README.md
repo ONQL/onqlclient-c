@@ -97,19 +97,21 @@ typedef struct {
 ## Direct ORM-style API
 
 On top of raw `onql_send_request`, the driver exposes convenience helpers for
-the common `insert` / `update` / `delete` / `onql` operations. Each helper:
+the `insert` / `update` / `delete` / `onql` operations. Each helper builds the
+standard payload envelope for you, parses the `{error, data}` response, and
+returns the decoded `data` as a newly heap-allocated string that the caller
+must free with `onql_free_string()`.
 
-- builds the standard payload envelope for you;
-- parses the `{error, data}` server response; and
-- returns the `data` field as a newly heap-allocated string that the caller
-  must free with `onql_free_string()`.
+Because the driver is dependency-free, every JSON-valued parameter (record,
+context values) is passed as a **pre-serialized JSON string** — use your
+favourite C JSON library (cJSON, jansson, …) to serialize.
 
-Because the driver is dependency-free, every JSON-valued parameter (records,
-query, ids, context values) is passed as a **pre-serialized JSON string** —
-use your favourite C JSON library (cJSON, jansson, …) to serialize.
+`path` is a dotted string identifying what you're operating on:
 
-Call `onql_setup(client, db)` once to bind a default database; subsequent
-`onql_insert` / `onql_update` / `onql_delete` / `onql_onql` calls will use it.
+| Path shape | Meaning |
+|------------|---------|
+| `"mydb.users"` | Table (used by `onql_insert`) |
+| `"mydb.users.u1"` | Record id `u1` (used by `onql_update` / `onql_delete`) |
 
 ### Error handling
 
@@ -118,46 +120,35 @@ non-empty `error` field, the helper returns `NULL` and `*out_error` is set to
 a newly allocated error message (caller frees with `onql_free_string`). On
 transport failure, both the return value and `*out_error` are `NULL`.
 
-### `onql_setup`
-
-```c
-void onql_setup(onql_client *client, const char *db);
-```
-
-Sets the default database name (copied internally).
-
 ### `onql_insert`
 
 ```c
 char *onql_insert(onql_client *client,
-                  const char *table,
-                  const char *records_json,
+                  const char *path,         /* e.g. "mydb.users" */
+                  const char *record_json,  /* a single JSON object */
                   char **out_error);
 ```
 
-Insert one record (`{...}`) or an array of records (`[{...},{...}]`).
-Returns the raw `data` substring of the server envelope.
+Insert a **single** record.
 
-### `onql_update` / `onql_delete`
+### `onql_update`
 
 ```c
 char *onql_update(onql_client *client,
-                  const char *table,
-                  const char *records_json,
-                  const char *query_json,
-                  const char *protopass,   /* NULL -> "default" */
-                  const char *ids_json,    /* NULL -> "[]"      */
-                  char **out_error);
-
-char *onql_delete(onql_client *client,
-                  const char *table,
-                  const char *query_json,
-                  const char *protopass,   /* NULL -> "default" */
-                  const char *ids_json,    /* NULL -> "[]"      */
+                  const char *path,         /* e.g. "mydb.users.u1" */
+                  const char *record_json,  /* JSON object of fields to update */
+                  const char *protopass,    /* NULL -> "default" */
                   char **out_error);
 ```
 
-Update/delete records matching `query_json`.
+### `onql_delete`
+
+```c
+char *onql_delete(onql_client *client,
+                  const char *path,         /* e.g. "mydb.users.u1" */
+                  const char *protopass,    /* NULL -> "default" */
+                  char **out_error);
+```
 
 ### `onql_onql`
 
@@ -170,8 +161,6 @@ char *onql_onql(onql_client *client,
                 char **out_error);
 ```
 
-Execute a raw ONQL query.
-
 ### `onql_build`
 
 ```c
@@ -181,10 +170,10 @@ char *onql_build(const char *query,
                  int n_values);
 ```
 
-Replace `$1`, `$2`, … placeholders. For each value, if
-`is_string[i]` is non-zero the value is double-quoted when substituted;
-otherwise it is inlined verbatim (suitable for numbers and booleans). Pass
-`is_string = NULL` to treat every value as raw.
+Replace `$1`, `$2`, … placeholders. For each value, if `is_string[i]` is
+non-zero the value is double-quoted when substituted; otherwise it is inlined
+verbatim (numbers, booleans). Pass `is_string = NULL` to treat every value
+as raw.
 
 ### `onql_process_result`
 
@@ -192,10 +181,10 @@ otherwise it is inlined verbatim (suitable for numbers and booleans). Pass
 int onql_process_result(const char *raw, char **out_data, char **out_error);
 ```
 
-Parse the standard `{"error":"…","data":"…"}` envelope. Returns `0` on
-success (no error), `-1` when the server reported an error or the envelope
-could not be parsed. Any non-NULL out-parameters receive newly allocated
-strings that the caller must free with `onql_free_string`.
+Parse the standard `{"error":"…","data":…}` envelope. Returns `0` on
+success, `-1` when the server reported an error or the envelope could not be
+parsed. Out-parameters (when non-NULL) receive newly allocated strings that
+the caller must free with `onql_free_string`.
 
 ### `onql_free_string`
 
@@ -215,12 +204,10 @@ int main(void) {
     onql_client *c = onql_connect("localhost", 5656);
     if (!c) return 1;
 
-    onql_setup(c, "mydb");
-
     char *err = NULL;
-    char *data = onql_insert(c, "users",
-        "{\"name\":\"John\",\"age\":30}", &err);
-    if (!data) { fprintf(stderr, "insert failed: %s\n", err ? err : "transport"); }
+
+    char *data = onql_insert(c, "mydb.users",
+        "{\"id\":\"u1\",\"name\":\"John\",\"age\":30}", &err);
     onql_free_string(data);
     onql_free_string(err);
 
@@ -228,7 +215,7 @@ int main(void) {
     const char *vals[]  = { "John", "18" };
     const int   quote[] = { 1, 0 };
     char *q = onql_build(
-        "select * from users where name = $1 and age > $2",
+        "select * from mydb.users where name = $1 and age > $2",
         vals, quote, 2);
 
     err = NULL;
@@ -237,6 +224,9 @@ int main(void) {
     onql_free_string(data);
     onql_free_string(err);
     onql_free_string(q);
+
+    onql_update(c, "mydb.users.u1", "{\"age\":31}", NULL, &err);
+    onql_delete(c, "mydb.users.u1", NULL, &err);
 
     onql_close(c);
     return 0;
